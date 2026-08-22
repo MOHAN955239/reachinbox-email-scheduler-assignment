@@ -1,0 +1,66 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum EmailStatus {
+  SCHEDULED
+  QUEUED
+  PROCESSING
+  SENT
+  FAILED
+  RESCHEDULED
+}
+
+// A "batch" represents one Compose action (a CSV upload + subject/body + settings).
+model Batch {
+  id            String   @id @default(uuid())
+  ownerEmail    String
+  subject       String
+  body          String   @db.Text
+  startTime     DateTime
+  delayMs       Int      @default(2000)
+  hourlyLimit   Int      @default(200)
+  senderEmail   String
+  totalRecipients Int
+  createdAt     DateTime @default(now())
+
+  emails EmailJob[]
+}
+
+// One row per recipient email — this is the source of truth for persistence.
+// BullMQ holds the *scheduling* state in Redis; this table holds the
+// *durable* state so a full Redis loss or restart can always be reconciled.
+model EmailJob {
+  id            String      @id @default(uuid())
+  batchId       String
+  batch         Batch       @relation(fields: [batchId], references: [id])
+
+  senderEmail   String
+  recipient     String
+  subject       String
+  body          String      @db.Text
+
+  scheduledAt   DateTime
+  status        EmailStatus @default(SCHEDULED)
+
+  // idempotency: the BullMQ job id we enqueued this row under.
+  // BullMQ itself de-dupes on jobId, and we double check this column
+  // before ever enqueuing/re-enqueuing so a row is never queued twice.
+  bullJobId     String?     @unique
+
+  attempts      Int         @default(0)
+  lastError     String?
+  sentAt        DateTime?
+
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@index([status])
+  @@index([scheduledAt])
+  @@index([senderEmail])
+}
